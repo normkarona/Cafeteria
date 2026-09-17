@@ -513,7 +513,7 @@ async def update_customer_receipt(bot, order_id, record, new_status, now):
     raise last_error
 
 
-async def delete_customer_notification_later(bot, chat_id, message_id, delay=60):
+async def delete_customer_notification_later(bot, chat_id, message_id, delay=300):
     """Delete a temporary customer status alert after a short delay."""
     await asyncio.sleep(delay)
     try:
