@@ -466,7 +466,8 @@ async def update_customer_receipt(bot, order_id, record, new_status, now):
     receipt = receipt.replace(
         "📌 Status: 🕐 *Waiting for acceptance*\n"
         "Thank you! We'll update this receipt as your order progresses. ☕",
-        customer_status_block(new_status, now),
+        customer_status_block(new_status, now)
+        + "\nThank you! We'll update this receipt as your order progresses. ☕",
     )
 
     # Telegram/Railway connections can occasionally fail during TLS setup.
@@ -510,6 +511,59 @@ async def update_customer_receipt(bot, order_id, record, new_status, now):
             )
 
     raise last_error
+
+
+async def delete_customer_notification_later(bot, chat_id, message_id, delay=60):
+    """Delete a temporary customer status alert after a short delay."""
+    await asyncio.sleep(delay)
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception as exc:
+        logger.warning(
+            "Could not auto-delete customer notification %s: %s",
+            message_id,
+            exc,
+        )
+
+
+async def send_customer_status_notification(bot, order_id, record, status):
+    """Send a push-producing status alert; keep the final Ready alert."""
+    messages = {
+        "not_accepted": (
+            "❌ *Order Not Accepted*\n"
+            f"Sorry, your order #{order_id} was not accepted."
+        ),
+        "accepted": (
+            "✅ *Order Accepted*\n"
+            f"Your order #{order_id} has been accepted."
+        ),
+        "in_progress": (
+            "👨‍🍳 *Order in Progress*\n"
+            f"We're preparing your order #{order_id} now."
+        ),
+        "ready": (
+            "☕ *Order Ready!*\n"
+            f"Your order #{order_id} is ready for pickup!"
+        ),
+    }
+
+    notification = await bot.send_message(
+        chat_id=record["chat_id"],
+        text=messages[status],
+        parse_mode="Markdown",
+    )
+
+    # Temporary alerts disappear after 60 seconds.
+    # Ready for Pickup stays visible because it is the important final alert.
+    if status != "ready":
+        asyncio.create_task(
+            delete_customer_notification_later(
+                bot,
+                record["chat_id"],
+                notification.message_id,
+                60,
+            )
+        )
 
 
 async def status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -606,7 +660,20 @@ async def status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif new_status == "ready":
         record["ready_at"] = now
 
-    await query.answer(f"Customer receipt updated: {status_label(new_status)}")
+    try:
+        await send_customer_status_notification(
+            context.bot,
+            order_id,
+            record,
+            new_status,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to send customer status notification for order %s",
+            order_id,
+        )
+
+    await query.answer(f"Customer updated: {status_label(new_status)}")
 
     # Keep the original order details but replace our previous status footer.
     original_text = query.message.text_markdown or query.message.text
