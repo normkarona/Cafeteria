@@ -40,6 +40,7 @@ from telegram import (
     Update,
     WebAppInfo,
 )
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -265,11 +266,13 @@ async def create_order_from_payload(bot, parsed, user, chat_id):
     orders[order_id] = order_record
 
     receipt = build_receipt(order_id, order_record)
+    # IMPORTANT: do not attach ReplyKeyboardMarkup to this receipt.
+    # Telegram cannot edit a message that was sent with a reply keyboard.
+    # The persistent "Order" keyboard is installed separately by /start.
     customer_message = await bot.send_message(
         chat_id=chat_id,
         text=receipt,
         parse_mode="Markdown",
-        reply_markup=order_keyboard(),
     )
     order_record["customer_message_id"] = customer_message.message_id
 
@@ -492,6 +495,10 @@ async def update_customer_receipt(bot, order_id, record, new_status, now):
                     attempt,
                 )
             return
+        except BadRequest:
+            # Telegram 400 errors are permanent request/message errors;
+            # retrying the same edit will not help.
+            raise
         except Exception as exc:
             last_error = exc
             logger.warning(
