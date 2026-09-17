@@ -484,14 +484,60 @@ def build_customers_report(period="month"):
     return "\n".join(lines)
 
 
+async def is_seller_user(bot, user_id):
+    """Return True when the Telegram user belongs to the configured seller group."""
+    if not SELLER_GROUP_ID:
+        return False
+    try:
+        member = await bot.get_chat_member(
+            chat_id=int(SELLER_GROUP_ID),
+            user_id=int(user_id),
+        )
+        return member.status in {"creator", "administrator", "member"}
+    except Exception:
+        logger.exception("Could not verify seller membership for user %s", user_id)
+        return False
+
+
 async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not SELLER_GROUP_ID or str(update.effective_chat.id) != str(SELLER_GROUP_ID):
-        await update.effective_message.reply_text("This dashboard is for café staff only.")
+    """
+    In the seller group: show the Telegram text dashboard.
+    In private chat: verified sellers get the graphical Mini App launcher.
+    """
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if str(chat.id) == str(SELLER_GROUP_ID):
+        await update.effective_message.reply_text(
+            build_sales_report("today"),
+            parse_mode="Markdown",
+            reply_markup=seller_dashboard_keyboard(),
+        )
         return
+
+    if chat.type == "private" and await is_seller_user(context.bot, user.id):
+        if not SELLER_DASHBOARD_URL:
+            await update.effective_message.reply_text(
+                "Seller dashboard URL is not configured yet."
+            )
+            return
+
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                "📊 Open Visual Dashboard",
+                web_app=WebAppInfo(url=SELLER_DASHBOARD_URL),
+            )
+        ]])
+        await update.effective_message.reply_text(
+            "☕ *Time Cafeteria — Seller Dashboard*\n\n"
+            "Tap below to open the graphical sales dashboard.",
+            parse_mode="Markdown",
+            reply_markup=keyboard,
+        )
+        return
+
     await update.effective_message.reply_text(
-        build_sales_report("today"),
-        parse_mode="Markdown",
-        reply_markup=seller_dashboard_keyboard(),
+        "This dashboard is for café staff only."
     )
 
 
@@ -1327,6 +1373,7 @@ def main() -> None:
     app.add_handler(CommandHandler("chatid", chatid))
     app.add_handler(CommandHandler("report", report_command))
     app.add_handler(CommandHandler("dashboard", dashboard_command))
+    app.add_handler(CommandHandler("seller", dashboard_command))
     app.add_handler(CallbackQueryHandler(report_callback, pattern=r"^report:"))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_web_app_data))
     app.add_handler(CallbackQueryHandler(status_callback, pattern=r"^status:"))
