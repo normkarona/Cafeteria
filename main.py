@@ -357,6 +357,165 @@ def build_sales_report(period="today"):
     return "\n".join(lines)
 
 
+
+def seller_dashboard_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📊 Today", callback_data="report:today"),
+            InlineKeyboardButton("📅 This Week", callback_data="report:week"),
+        ],
+        [
+            InlineKeyboardButton("🗓 This Month", callback_data="report:month"),
+        ],
+        [
+            InlineKeyboardButton("🧾 Recent Orders", callback_data="report:recent"),
+        ],
+        [
+            InlineKeyboardButton("🏆 Top Items", callback_data="report:items"),
+            InlineKeyboardButton("👥 Customers", callback_data="report:customers"),
+        ],
+        [
+            InlineKeyboardButton("🔄 Refresh", callback_data="report:refresh"),
+        ],
+    ])
+
+
+def build_recent_orders_report(limit=10):
+    with db_connect() as conn:
+        rows = conn.execute("""
+            SELECT order_id, customer_name, total_khr, total_usd, status, placed_at
+            FROM orders
+            ORDER BY placed_at DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+
+    lines = ["🧾 *Recent Orders*", ""]
+    if not rows:
+        return "\n".join(lines + ["No orders yet."])
+
+    icons = {
+        "pending": "🕐",
+        "accepted": "✅",
+        "in_progress": "👨‍🍳",
+        "ready": "☕",
+        "not_accepted": "❌",
+    }
+    for r in rows:
+        try:
+            dt = datetime.fromisoformat(r["placed_at"]).strftime("%b %d %I:%M %p")
+        except Exception:
+            dt = r["placed_at"]
+        lines += [
+            f"{icons.get(r['status'], '•')} *#{r['order_id']}*",
+            f"{r['customer_name']} · {int(r['total_khr']):,}៛ (${r['total_usd']:.2f})",
+            f"{dt} · {status_label(r['status'])}",
+            "",
+        ]
+    return "\n".join(lines).rstrip()
+
+
+def build_top_items_report(period="month"):
+    now = datetime.now(CAMBODIA_TZ)
+    start = report_period_start(period, now)
+    with db_connect() as conn:
+        rows = conn.execute("""
+            SELECT oi.item_name, oi.category,
+                   SUM(oi.quantity) qty,
+                   SUM(oi.quantity * oi.unit_price_khr) sales_khr,
+                   SUM(oi.quantity * oi.unit_price_usd) sales_usd
+            FROM order_items oi
+            JOIN orders o ON o.order_id = oi.order_id
+            WHERE o.placed_at >= ? AND o.status != 'not_accepted'
+            GROUP BY oi.item_name, oi.category
+            ORDER BY qty DESC, sales_usd DESC
+            LIMIT 15
+        """, (start.isoformat(),)).fetchall()
+
+    lines = ["🏆 *Top Items — This Month*", ""]
+    if not rows:
+        return "\n".join(lines + ["No sales yet."])
+    for i, r in enumerate(rows, 1):
+        icon = "☕" if r["category"] == "drink" else "🍳" if r["category"] == "breakfast" else "•"
+        lines.append(
+            f"{i}. {icon} *{r['item_name']}* — {r['qty']} sold · "
+            f"{int(r['sales_khr']):,}៛"
+        )
+    return "\n".join(lines)
+
+
+def build_customers_report(period="month"):
+    now = datetime.now(CAMBODIA_TZ)
+    start = report_period_start(period, now)
+    with db_connect() as conn:
+        rows = conn.execute("""
+            SELECT telegram_user_id, customer_name, customer_username,
+                   COUNT(*) orders_count,
+                   SUM(total_khr) spent_khr,
+                   SUM(total_usd) spent_usd
+            FROM orders
+            WHERE placed_at >= ? AND status != 'not_accepted'
+            GROUP BY telegram_user_id, customer_name, customer_username
+            ORDER BY orders_count DESC, spent_usd DESC
+            LIMIT 15
+        """, (start.isoformat(),)).fetchall()
+
+    lines = ["👥 *Top Customers — This Month*", ""]
+    if not rows:
+        return "\n".join(lines + ["No customer data yet."])
+    for i, r in enumerate(rows, 1):
+        username = f" (@{r['customer_username']})" if r["customer_username"] else ""
+        lines += [
+            f"{i}. *{r['customer_name']}*{username}",
+            f"   🧾 {r['orders_count']} orders · 💰 {int(r['spent_khr']):,}៛ (${r['spent_usd']:.2f})",
+        ]
+    return "\n".join(lines)
+
+
+async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not SELLER_GROUP_ID or str(update.effective_chat.id) != str(SELLER_GROUP_ID):
+        await update.effective_message.reply_text("This dashboard is for café staff only.")
+        return
+    await update.effective_message.reply_text(
+        build_sales_report("today"),
+        parse_mode="Markdown",
+        reply_markup=seller_dashboard_keyboard(),
+    )
+
+
+async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not SELLER_GROUP_ID or str(query.message.chat.id) != str(SELLER_GROUP_ID):
+        await query.answer("This dashboard is for café staff only.", show_alert=True)
+        return
+
+    action = query.data.split(":", 1)[1]
+    if action in {"today", "week", "month"}:
+        text = build_sales_report(action)
+    elif action == "recent":
+        text = build_recent_orders_report()
+    elif action == "items":
+        text = build_top_items_report()
+    elif action == "customers":
+        text = build_customers_report()
+    elif action == "refresh":
+        text = build_sales_report("today")
+    else:
+        await query.answer("Unknown dashboard action.", show_alert=True)
+        return
+
+    try:
+        await query.edit_message_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=seller_dashboard_keyboard(),
+        )
+    except BadRequest as exc:
+        # Telegram returns this when Refresh produces identical content.
+        if "message is not modified" not in str(exc).lower():
+            raise
+    await query.answer()
+
+
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Seller-only: /report, /report week, /report month."""
     if not SELLER_GROUP_ID or str(update.effective_chat.id) != str(SELLER_GROUP_ID):
@@ -369,6 +528,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.effective_message.reply_text(
         build_sales_report(period),
         parse_mode="Markdown",
+        reply_markup=seller_dashboard_keyboard(),
     )
 
 
@@ -1039,6 +1199,8 @@ def main() -> None:
     app.add_handler(CommandHandler("order", order))
     app.add_handler(CommandHandler("chatid", chatid))
     app.add_handler(CommandHandler("report", report_command))
+    app.add_handler(CommandHandler("dashboard", dashboard_command))
+    app.add_handler(CallbackQueryHandler(report_callback, pattern=r"^report:"))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_web_app_data))
     app.add_handler(CallbackQueryHandler(status_callback, pattern=r"^status:"))
 
