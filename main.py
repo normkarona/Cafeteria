@@ -1,5 +1,5 @@
 """
-Sunrise Café — Telegram bot (v6)
+Time Cafeteria — Telegram bot (v6)
 --------------------------------
 Restores the boxed monospace table look, but narrower and with
 options moved to their own indented line underneath each item,
@@ -114,7 +114,7 @@ def order_keyboard():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Welcome to Sunrise Café! Tap the button below to order.",
+        "Welcome to Time Caféteria! Tap the button below to order.",
         reply_markup=order_keyboard(),
     )
 
@@ -176,7 +176,7 @@ def build_items_table(items):
 
 def build_receipt(order_id, order_record):
     lines = [
-        "🧾 *Sunrise Café — Receipt*",
+        "🧾 *Time Caféteria — Receipt*",
         f"Order #{order_id}",
         order_record["placed_at"].strftime("%b %d, %Y %I:%M %p"),
         "",
@@ -345,10 +345,10 @@ def status_label(status):
 def customer_status_message(order_id, status):
     messages = {
         "not_accepted": (
-            f"❌ Sorry, your order #{order_id} was not accepted by Sunrise Café."
+            f"❌ Sorry, your order #{order_id} was not accepted by Time Caféteria."
         ),
         "accepted": (
-            f"✅ Your order #{order_id} has been accepted by Sunrise Café."
+            f"✅ Your order #{order_id} has been accepted by Time Caféteria."
         ),
         "in_progress": (
             f"👨‍🍳 Your order #{order_id} is now being prepared."
