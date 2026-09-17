@@ -358,6 +358,15 @@ def build_sales_report(period="today"):
 
 
 
+def seller_menu_keyboard():
+    """Persistent seller shortcut shown in the seller group."""
+    return ReplyKeyboardMarkup(
+        [["📊 Seller Dashboard"]],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
 def seller_dashboard_keyboard():
     return InlineKeyboardMarkup([
         [
@@ -483,6 +492,17 @@ def build_customers_report(period="month"):
     return "\n".join(lines)
 
 
+async def seller_dashboard_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Open the seller dashboard when staff taps the persistent shortcut."""
+    if not SELLER_GROUP_ID or str(update.effective_chat.id) != str(SELLER_GROUP_ID):
+        return
+    await update.effective_message.reply_text(
+        build_sales_report("today"),
+        parse_mode="Markdown",
+        reply_markup=seller_dashboard_keyboard(),
+    )
+
+
 async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not SELLER_GROUP_ID or str(update.effective_chat.id) != str(SELLER_GROUP_ID):
         await update.effective_message.reply_text("This dashboard is for café staff only.")
@@ -491,6 +511,10 @@ async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         build_sales_report("today"),
         parse_mode="Markdown",
         reply_markup=seller_dashboard_keyboard(),
+    )
+    await update.effective_message.reply_text(
+        "Seller shortcut enabled.",
+        reply_markup=seller_menu_keyboard(),
     )
 
 
@@ -1212,6 +1236,7 @@ def main() -> None:
     app.add_handler(CommandHandler("chatid", chatid))
     app.add_handler(CommandHandler("report", report_command))
     app.add_handler(CommandHandler("dashboard", dashboard_command))
+    app.add_handler(MessageHandler(filters.Regex(r"^📊 Seller Dashboard$"), seller_dashboard_button))
     app.add_handler(CallbackQueryHandler(report_callback, pattern=r"^report:"))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_web_app_data))
     app.add_handler(CallbackQueryHandler(status_callback, pattern=r"^status:"))
