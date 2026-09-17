@@ -18,6 +18,7 @@ Run:
 
 import json
 import logging
+import asyncio
 import os
 import hashlib
 import hmac
@@ -465,12 +466,43 @@ async def update_customer_receipt(bot, order_id, record, new_status, now):
         customer_status_block(new_status, now),
     )
 
-    await bot.edit_message_text(
-        chat_id=record["chat_id"],
-        message_id=message_id,
-        text=receipt,
-        parse_mode="Markdown",
-    )
+    # Telegram/Railway connections can occasionally fail during TLS setup.
+    # Retry transient connection failures before giving up.
+    retry_delays = (0, 0.7, 1.5)
+    last_error = None
+
+    for attempt, delay in enumerate(retry_delays, start=1):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            await bot.edit_message_text(
+                chat_id=record["chat_id"],
+                message_id=message_id,
+                text=receipt,
+                parse_mode="Markdown",
+                connect_timeout=15,
+                read_timeout=20,
+                write_timeout=20,
+                pool_timeout=10,
+            )
+            if attempt > 1:
+                logger.info(
+                    "Customer receipt for order %s updated successfully on retry %s",
+                    order_id,
+                    attempt,
+                )
+            return
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "Customer receipt update attempt %s/%s failed for order %s: %s",
+                attempt,
+                len(retry_delays),
+                order_id,
+                exc,
+            )
+
+    raise last_error
 
 
 async def status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
