@@ -19,10 +19,17 @@ Run:
 import json
 import logging
 import os
+import hashlib
+import hmac
+import time
+from urllib.parse import parse_qsl
 from pathlib import Path
 import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from types import SimpleNamespace
+
+from aiohttp import web
 
 from telegram import (
     InlineKeyboardButton,
@@ -49,6 +56,8 @@ WEB_APP_URL = os.environ.get("WEB_APP_URL")
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SELLER_GROUP_ID = os.environ.get("SELLER_GROUP_ID")
+PORT = int(os.environ.get("PORT", "8080"))
+ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "*")
 
 # Persistent daily order counter.
 # On Railway, mount a Volume at /data so the sequence survives restarts/deployments.
@@ -210,25 +219,36 @@ def build_owner_alert(order_id, order_record, user):
     return "\n".join(lines)
 
 
-async def handle_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    raw = update.effective_message.web_app_data.data
-    logger.info("Received order data: %s", raw)
+def validate_telegram_init_data(init_data: str, max_age_seconds: int = 86400):
+    """Validate Telegram Mini App initData and return its parsed fields."""
+    if not init_data:
+        raise ValueError("Missing Telegram initData")
 
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        await update.message.reply_text(
-            "Got your order, but couldn't read it — please try again.",
-            reply_markup=order_keyboard(),
-        )
-        return
+    data = dict(parse_qsl(init_data, keep_blank_values=True))
+    received_hash = data.pop("hash", None)
+    if not received_hash:
+        raise ValueError("Missing initData hash")
 
-    user = update.effective_user
+    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
+    secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode("utf-8"), hashlib.sha256).digest()
+    calculated_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(calculated_hash, received_hash):
+        raise ValueError("Invalid Telegram initData")
+
+    auth_date = int(data.get("auth_date", "0"))
+    if not auth_date or abs(int(time.time()) - auth_date) > max_age_seconds:
+        raise ValueError("Expired Telegram initData")
+
+    return data
+
+
+async def create_order_from_payload(bot, parsed, user, chat_id):
+    """Create an order and send the same customer/seller messages used by reply-keyboard orders."""
     now = datetime.now(CAMBODIA_TZ)
     order_id = new_order_id(now)
 
     order_record = {
-        "chat_id": update.effective_chat.id,
+        "chat_id": chat_id,
         "customer_name": user.full_name,
         "customer_username": user.username,
         "items": parsed.get("items", []),
@@ -243,25 +263,87 @@ async def handle_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE
     orders[order_id] = order_record
 
     receipt = build_receipt(order_id, order_record)
-    await update.message.reply_text(
-        receipt,
-        parse_mode="Markdown",
-        reply_markup=order_keyboard(),
-    )
+    await bot.send_message(chat_id=chat_id, text=receipt, parse_mode="Markdown", reply_markup=order_keyboard())
 
     if SELLER_GROUP_ID:
         alert_text = build_owner_alert(order_id, order_record, user)
-        keyboard = order_status_keyboard(order_id, order_record["status"])
         try:
-            await context.bot.send_message(
+            await bot.send_message(
                 chat_id=int(SELLER_GROUP_ID),
                 text=alert_text,
                 parse_mode="Markdown",
-                reply_markup=keyboard,
+                reply_markup=order_status_keyboard(order_id, "pending"),
             )
         except Exception:
             logger.exception("Failed to notify seller group")
 
+    return order_id
+
+
+async def api_order(request):
+    """Receive orders when the Mini App was opened from Telegram's persistent menu button."""
+    try:
+        body = await request.json()
+        init_fields = validate_telegram_init_data(body.get("initData", ""))
+        user_data = json.loads(init_fields.get("user", "{}"))
+        user_id = int(user_data["id"])
+        user = SimpleNamespace(
+            id=user_id,
+            full_name=" ".join(filter(None, [user_data.get("first_name"), user_data.get("last_name")])) or "Customer",
+            username=user_data.get("username"),
+        )
+        order_id = await create_order_from_payload(request.app["telegram_bot"], body.get("order", {}), user, user_id)
+        return web.json_response({"ok": True, "orderId": order_id}, headers={"Access-Control-Allow-Origin": ALLOWED_ORIGIN})
+    except Exception as exc:
+        logger.exception("Menu-button order failed")
+        return web.json_response({"ok": False, "error": str(exc)}, status=400, headers={"Access-Control-Allow-Origin": ALLOWED_ORIGIN})
+
+
+async def api_options(request):
+    return web.Response(status=204, headers={
+        "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+    })
+
+
+async def start_api(application):
+    api = web.Application()
+    api["telegram_bot"] = application.bot
+    api.router.add_post("/api/order", api_order)
+    api.router.add_options("/api/order", api_options)
+    runner = web.AppRunner(api)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    application.bot_data["api_runner"] = runner
+    logger.info("Order API listening on port %s", PORT)
+
+
+async def stop_api(application):
+    runner = application.bot_data.get("api_runner")
+    if runner:
+        await runner.cleanup()
+
+
+async def handle_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    raw = update.effective_message.web_app_data.data
+    logger.info("Received order data: %s", raw)
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        await update.message.reply_text(
+            "Got your order, but couldn't read it — please try again.",
+            reply_markup=order_keyboard(),
+        )
+        return
+
+    await create_order_from_payload(
+        context.bot,
+        parsed,
+        update.effective_user,
+        update.effective_chat.id,
+    )
 
 def order_status_keyboard(order_id, current_status="pending"):
     """Build seller buttons based on the current order status."""
@@ -504,7 +586,13 @@ def main() -> None:
     if not WEB_APP_URL:
         raise SystemExit("WEB_APP_URL secret is not set.")
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(start_api)
+        .post_shutdown(stop_api)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("order", order))
