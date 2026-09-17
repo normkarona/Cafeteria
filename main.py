@@ -358,15 +358,6 @@ def build_sales_report(period="today"):
 
 
 
-def seller_menu_keyboard():
-    """Persistent seller shortcut shown in the seller group."""
-    return ReplyKeyboardMarkup(
-        [["📊 Seller Dashboard"]],
-        resize_keyboard=True,
-        is_persistent=True,
-    )
-
-
 def seller_dashboard_keyboard():
     return InlineKeyboardMarkup([
         [
@@ -492,17 +483,6 @@ def build_customers_report(period="month"):
     return "\n".join(lines)
 
 
-async def seller_dashboard_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Open the seller dashboard when staff taps the persistent shortcut."""
-    if not SELLER_GROUP_ID or str(update.effective_chat.id) != str(SELLER_GROUP_ID):
-        return
-    await update.effective_message.reply_text(
-        build_sales_report("today"),
-        parse_mode="Markdown",
-        reply_markup=seller_dashboard_keyboard(),
-    )
-
-
 async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not SELLER_GROUP_ID or str(update.effective_chat.id) != str(SELLER_GROUP_ID):
         await update.effective_message.reply_text("This dashboard is for café staff only.")
@@ -511,10 +491,6 @@ async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         build_sales_report("today"),
         parse_mode="Markdown",
         reply_markup=seller_dashboard_keyboard(),
-    )
-    await update.effective_message.reply_text(
-        "Seller shortcut enabled.",
-        reply_markup=seller_menu_keyboard(),
     )
 
 
@@ -853,77 +829,43 @@ async def handle_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 def order_status_keyboard(order_id, current_status="pending"):
-    """Build seller buttons based on the current order status."""
+    """Seller order controls with an always-available dashboard shortcut."""
+    dashboard = [
+        InlineKeyboardButton("📊 Seller Dashboard", callback_data="report:today")
+    ]
 
-    # Brand-new order: seller can accept or decline it.
     if current_status == "pending":
-        return InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "✅ Accept Order",
-                    callback_data=f"status:accepted:{order_id}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "❌ Order Not Accepted",
-                    callback_data=f"status:not_accepted:{order_id}"
-                )
-            ],
-        ])
-
-    # Declined order: show only one recovery action.
-    if current_status == "not_accepted":
-        return InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "✅ Change to Accepted",
-                    callback_data=f"status:accepted:{order_id}"
-                )
-            ]
-        ])
-
-    # Accepted order: Accepted is visibly completed and cannot trigger again.
-    if current_status == "accepted":
-        return InlineKeyboardMarkup([
+        rows = [
+            [InlineKeyboardButton("✅ Accept Order", callback_data=f"status:accepted:{order_id}")],
+            [InlineKeyboardButton("❌ Order Not Accepted", callback_data=f"status:not_accepted:{order_id}")],
+        ]
+    elif current_status == "not_accepted":
+        rows = [
+            [InlineKeyboardButton("✅ Change to Accepted", callback_data=f"status:accepted:{order_id}")]
+        ]
+    elif current_status == "accepted":
+        rows = [
             [InlineKeyboardButton("✅ Accepted ✓", callback_data="noop")],
-            [
-                InlineKeyboardButton(
-                    "👨‍🍳 Order in Progress",
-                    callback_data=f"status:in_progress:{order_id}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "☕ Order is Ready",
-                    callback_data=f"status:ready:{order_id}"
-                )
-            ],
-        ])
-
-    # In progress: accepted + progress are completed.
-    if current_status == "in_progress":
-        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("👨‍🍳 Order in Progress", callback_data=f"status:in_progress:{order_id}")],
+            [InlineKeyboardButton("☕ Order is Ready", callback_data=f"status:ready:{order_id}")],
+        ]
+    elif current_status == "in_progress":
+        rows = [
             [InlineKeyboardButton("✅ Accepted ✓", callback_data="noop")],
             [InlineKeyboardButton("👨‍🍳 In Progress ✓", callback_data="noop")],
-            [
-                InlineKeyboardButton(
-                    "☕ Order is Ready",
-                    callback_data=f"status:ready:{order_id}"
-                )
-            ],
-        ])
-
-    # Ready: everything is completed.
-    if current_status == "ready":
-        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("☕ Order is Ready", callback_data=f"status:ready:{order_id}")],
+        ]
+    elif current_status == "ready":
+        rows = [
             [InlineKeyboardButton("✅ Accepted ✓", callback_data="noop")],
             [InlineKeyboardButton("👨‍🍳 In Progress ✓", callback_data="noop")],
             [InlineKeyboardButton("☕ Ready ✓", callback_data="noop")],
-        ])
+        ]
+    else:
+        rows = []
 
-    return InlineKeyboardMarkup([])
-
+    rows.append(dashboard)
+    return InlineKeyboardMarkup(rows)
 
 def status_label(status):
     return {
@@ -1236,7 +1178,6 @@ def main() -> None:
     app.add_handler(CommandHandler("chatid", chatid))
     app.add_handler(CommandHandler("report", report_command))
     app.add_handler(CommandHandler("dashboard", dashboard_command))
-    app.add_handler(MessageHandler(filters.Regex(r"^📊 Seller Dashboard$"), seller_dashboard_button))
     app.add_handler(CallbackQueryHandler(report_callback, pattern=r"^report:"))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_web_app_data))
     app.add_handler(CallbackQueryHandler(status_callback, pattern=r"^status:"))
