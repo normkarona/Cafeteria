@@ -501,6 +501,18 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     action = query.data.split(":", 1)[1]
+    # If Dashboard was opened from an ORDER message, never edit/replace that
+    # order. Send the dashboard as a separate message so order controls remain.
+    if action == "today" and "New order #" in (query.message.text or ""):
+        await query.answer()
+        await context.bot.send_message(
+            chat_id=query.message.chat.id,
+            text=build_sales_report("today"),
+            parse_mode="Markdown",
+            reply_markup=seller_dashboard_keyboard(),
+        )
+        return
+
     if action in {"today", "week", "month"}:
         text = build_sales_report(action)
     elif action == "recent":
