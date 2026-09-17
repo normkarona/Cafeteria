@@ -407,7 +407,7 @@ def build_recent_orders_report(limit=10):
             dt = r["placed_at"]
         lines += [
             f"{icons.get(r['status'], '•')} *#{r['order_id']}*",
-            f"{r['customer_name']} · {int(r['total_khr']):,}៛ (${r['total_usd']:.2f})",
+            f"{escape_markdown_text(r['customer_name'])} · {int(r['total_khr']):,}៛ (${r['total_usd']:.2f})",
             f"{dt} · {status_label(r['status'])}",
             "",
         ]
@@ -437,10 +437,18 @@ def build_top_items_report(period="month"):
     for i, r in enumerate(rows, 1):
         icon = "☕" if r["category"] == "drink" else "🍳" if r["category"] == "breakfast" else "•"
         lines.append(
-            f"{i}. {icon} *{r['item_name']}* — {r['qty']} sold · "
+            f"{i}. {icon} *{escape_markdown_text(r['item_name'])}* — {r['qty']} sold · "
             f"{int(r['sales_khr']):,}៛"
         )
     return "\n".join(lines)
+
+
+def escape_markdown_text(value):
+    """Escape dynamic text used inside Telegram legacy Markdown messages."""
+    text = str(value or "")
+    for char in ("\\", "_", "*", "`", "["):
+        text = text.replace(char, "\\" + char)
+    return text
 
 
 def build_customers_report(period="month"):
@@ -463,9 +471,13 @@ def build_customers_report(period="month"):
     if not rows:
         return "\n".join(lines + ["No customer data yet."])
     for i, r in enumerate(rows, 1):
-        username = f" (@{r['customer_username']})" if r["customer_username"] else ""
+        customer_name = escape_markdown_text(r["customer_name"])
+        username = (
+            f" (@{escape_markdown_text(r['customer_username'])})"
+            if r["customer_username"] else ""
+        )
         lines += [
-            f"{i}. *{r['customer_name']}*{username}",
+            f"{i}. *{customer_name}*{username}",
             f"   🧾 {r['orders_count']} orders · 💰 {int(r['spent_khr']):,}៛ (${r['spent_usd']:.2f})",
         ]
     return "\n".join(lines)
