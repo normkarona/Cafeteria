@@ -19,6 +19,7 @@ Run:
 import json
 import logging
 import os
+from pathlib import Path
 import re
 from datetime import datetime
 
@@ -48,6 +49,10 @@ WEB_APP_URL = os.environ.get("WEB_APP_URL")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SELLER_GROUP_ID = os.environ.get("SELLER_GROUP_ID")
 
+# Persistent daily order counter.
+# On Railway, mount a Volume at /data so the sequence survives restarts/deployments.
+COUNTER_FILE = os.environ.get("COUNTER_FILE", "/data/order_counters.json")
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -62,14 +67,31 @@ PRICE_COL = 7
 
 
 def new_order_id(now):
-    """Create a unique order ID using date + time + microseconds.
+    """Return YYYYMMDD-000001 style IDs with a daily persistent sequence."""
+    date_str = now.strftime("%Y%m%d")
 
-    Example: 20260917-140105-482731
-    Unlike the old daily counter, this does not reset to 000001 after restart.
-    """
-    return now.strftime("%Y%m%d-%H%M%S-%f")
+    counters = {}
+    try:
+        counter_path = Path(COUNTER_FILE)
+        counter_path.parent.mkdir(parents=True, exist_ok=True)
 
+        if counter_path.exists():
+            with counter_path.open("r", encoding="utf-8") as f:
+                counters = json.load(f)
 
+        next_number = int(counters.get(date_str, 0)) + 1
+        counters[date_str] = next_number
+
+        # Keep only recent/current counters small; current date is what matters.
+        with counter_path.open("w", encoding="utf-8") as f:
+            json.dump(counters, f)
+
+    except Exception:
+        logger.exception("Could not persist order counter; using in-memory fallback.")
+        daily_counters[date_str] = daily_counters.get(date_str, 0) + 1
+        next_number = daily_counters[date_str]
+
+    return f"{date_str}-{next_number:06d}"
 
 
 def escape_md(text):
