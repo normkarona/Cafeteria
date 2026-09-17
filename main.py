@@ -1,4 +1,3 @@
-
 """
 Time Cafeteria — Telegram bot (v6)
 --------------------------------
@@ -379,10 +378,7 @@ def seller_dashboard_keyboard():
         [
             InlineKeyboardButton("🔄 Refresh", callback_data="report:refresh"),
         ],
-    ] + (
-        [[seller_dashboard_web_button()]]
-        if seller_dashboard_web_button() else []
-    ))
+    ])
 
 
 def build_recent_orders_report(limit=10):
@@ -1018,9 +1014,6 @@ def order_status_keyboard(order_id, current_status="pending"):
         rows = []
 
     rows.append(dashboard)
-    visual_button = seller_dashboard_web_button()
-    if visual_button:
-        rows.append([visual_button])
     return InlineKeyboardMarkup(rows)
 
 def status_label(status):
