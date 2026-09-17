@@ -1,3 +1,4 @@
+
 """
 Time Cafeteria — Telegram bot (v6)
 --------------------------------
@@ -61,6 +62,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SELLER_GROUP_ID = os.environ.get("SELLER_GROUP_ID")
 PORT = int(os.environ.get("PORT", "8080"))
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "*")
+SELLER_DASHBOARD_URL = os.environ.get("SELLER_DASHBOARD_URL", "")
 
 # Persistent daily order counter.
 # On Railway, mount a Volume at /data so the sequence survives restarts/deployments.
@@ -377,7 +379,10 @@ def seller_dashboard_keyboard():
         [
             InlineKeyboardButton("🔄 Refresh", callback_data="report:refresh"),
         ],
-    ])
+    ] + (
+        [[seller_dashboard_web_button()]]
+        if seller_dashboard_web_button() else []
+    ))
 
 
 def build_recent_orders_report(limit=10):
@@ -773,6 +778,140 @@ async def create_order_from_payload(bot, parsed, user, chat_id):
     return order_id
 
 
+
+def seller_dashboard_web_button():
+    """Optional graphical dashboard button when SELLER_DASHBOARD_URL is configured."""
+    if not SELLER_DASHBOARD_URL:
+        return None
+    return InlineKeyboardButton(
+        "🌐 Open Visual Dashboard",
+        web_app=WebAppInfo(url=SELLER_DASHBOARD_URL),
+    )
+
+
+def dashboard_payload(period="today"):
+    """Return graphical dashboard data from the persistent SQLite database."""
+    now = datetime.now(CAMBODIA_TZ)
+    start = report_period_start(period, now)
+    start_iso = start.isoformat()
+
+    with db_connect() as conn:
+        summary = conn.execute("""
+            SELECT COUNT(*) orders_count,
+                   COALESCE(SUM(total_usd),0) sales_usd,
+                   COALESCE(SUM(total_khr),0) sales_khr
+            FROM orders
+            WHERE placed_at >= ? AND status != 'not_accepted'
+        """, (start_iso,)).fetchone()
+
+        item_summary = conn.execute("""
+            SELECT COALESCE(SUM(CASE WHEN oi.category='drink' THEN oi.quantity ELSE 0 END),0) drinks,
+                   COALESCE(SUM(CASE WHEN oi.category='breakfast' THEN oi.quantity ELSE 0 END),0) breakfasts
+            FROM order_items oi JOIN orders o ON o.order_id=oi.order_id
+            WHERE o.placed_at >= ? AND o.status != 'not_accepted'
+        """, (start_iso,)).fetchone()
+
+        top_items = conn.execute("""
+            SELECT oi.item_name name, oi.category category, SUM(oi.quantity) qty,
+                   SUM(oi.quantity*oi.unit_price_khr) sales_khr
+            FROM order_items oi JOIN orders o ON o.order_id=oi.order_id
+            WHERE o.placed_at >= ? AND o.status != 'not_accepted'
+            GROUP BY oi.item_name, oi.category
+            ORDER BY qty DESC, sales_khr DESC LIMIT 10
+        """, (start_iso,)).fetchall()
+
+        customers = conn.execute("""
+            SELECT customer_name name, customer_username username,
+                   COUNT(*) orders_count,
+                   SUM(total_khr) spent_khr, SUM(total_usd) spent_usd
+            FROM orders
+            WHERE placed_at >= ? AND status != 'not_accepted'
+            GROUP BY telegram_user_id, customer_name, customer_username
+            ORDER BY orders_count DESC, spent_usd DESC LIMIT 10
+        """, (start_iso,)).fetchall()
+
+        recent = conn.execute("""
+            SELECT order_id, customer_name, total_khr, total_usd, status, placed_at
+            FROM orders ORDER BY placed_at DESC LIMIT 20
+        """).fetchall()
+
+        # Daily trend for the selected period.
+        trend = conn.execute("""
+            SELECT substr(placed_at,1,10) day,
+                   COUNT(*) orders_count,
+                   COALESCE(SUM(total_khr),0) sales_khr,
+                   COALESCE(SUM(total_usd),0) sales_usd
+            FROM orders
+            WHERE placed_at >= ? AND status != 'not_accepted'
+            GROUP BY substr(placed_at,1,10)
+            ORDER BY day
+        """, (start_iso,)).fetchall()
+
+    orders_count = int(summary["orders_count"])
+    sales_usd = float(summary["sales_usd"])
+    return {
+        "ok": True,
+        "period": period,
+        "generatedAt": now.isoformat(),
+        "summary": {
+            "orders": orders_count,
+            "salesUSD": sales_usd,
+            "salesKHR": int(summary["sales_khr"]),
+            "avgOrderUSD": (sales_usd / orders_count) if orders_count else 0,
+            "drinks": int(item_summary["drinks"]),
+            "breakfasts": int(item_summary["breakfasts"]),
+        },
+        "topItems": [dict(r) for r in top_items],
+        "customers": [dict(r) for r in customers],
+        "recentOrders": [dict(r) for r in recent],
+        "trend": [dict(r) for r in trend],
+    }
+
+
+async def api_dashboard(request):
+    """Seller-only dashboard API authenticated by Telegram Mini App initData."""
+    try:
+        init_fields = validate_telegram_init_data(request.query.get("initData", ""))
+        user_data = json.loads(init_fields.get("user", "{}"))
+        user_id = int(user_data["id"])
+
+        # Seller dashboard is intentionally restricted to members/admins of SELLER_GROUP_ID.
+        if not SELLER_GROUP_ID:
+            raise PermissionError("Seller group is not configured.")
+        member = await request.app["telegram_bot"].get_chat_member(
+            chat_id=int(SELLER_GROUP_ID), user_id=user_id
+        )
+        if member.status not in {"creator", "administrator", "member"}:
+            raise PermissionError("Seller access required.")
+
+        period = request.query.get("period", "today").lower()
+        if period not in {"today", "week", "month"}:
+            period = "today"
+        return web.json_response(
+            dashboard_payload(period),
+            headers={"Access-Control-Allow-Origin": ALLOWED_ORIGIN},
+        )
+    except PermissionError as exc:
+        return web.json_response(
+            {"ok": False, "error": str(exc)}, status=403,
+            headers={"Access-Control-Allow-Origin": ALLOWED_ORIGIN},
+        )
+    except Exception as exc:
+        logger.exception("Dashboard API failed")
+        return web.json_response(
+            {"ok": False, "error": str(exc)}, status=400,
+            headers={"Access-Control-Allow-Origin": ALLOWED_ORIGIN},
+        )
+
+
+async def api_dashboard_options(request):
+    return web.Response(status=204, headers={
+        "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+    })
+
+
 async def api_order(request):
     """Receive orders when the Mini App was opened from Telegram's persistent menu button."""
     try:
@@ -807,6 +946,8 @@ async def start_api(application):
     api["telegram_bot"] = application.bot
     api.router.add_post("/api/order", api_order)
     api.router.add_options("/api/order", api_options)
+    api.router.add_get("/api/dashboard", api_dashboard)
+    api.router.add_options("/api/dashboard", api_dashboard_options)
     runner = web.AppRunner(api)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
@@ -877,6 +1018,9 @@ def order_status_keyboard(order_id, current_status="pending"):
         rows = []
 
     rows.append(dashboard)
+    visual_button = seller_dashboard_web_button()
+    if visual_button:
+        rows.append([visual_button])
     return InlineKeyboardMarkup(rows)
 
 def status_label(status):
