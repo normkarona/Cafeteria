@@ -22,6 +22,7 @@ import os
 from pathlib import Path
 import re
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from telegram import (
     InlineKeyboardButton,
@@ -52,6 +53,9 @@ SELLER_GROUP_ID = os.environ.get("SELLER_GROUP_ID")
 # Persistent daily order counter.
 # On Railway, mount a Volume at /data so the sequence survives restarts/deployments.
 COUNTER_FILE = os.environ.get("COUNTER_FILE", "/data/order_counters.json")
+
+# Cambodia local timezone (UTC+7)
+CAMBODIA_TZ = ZoneInfo("Asia/Phnom_Penh")
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -220,7 +224,7 @@ async def handle_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     user = update.effective_user
-    now = datetime.now()
+    now = datetime.now(CAMBODIA_TZ)
     order_id = new_order_id(now)
 
     order_record = {
@@ -422,7 +426,7 @@ async def status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.answer("This order is already completed.", show_alert=True)
         return
 
-    now = datetime.now()
+    now = datetime.now(CAMBODIA_TZ)
     record["status"] = new_status
 
     if new_status == "not_accepted":
