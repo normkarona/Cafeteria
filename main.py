@@ -954,6 +954,97 @@ async def api_dashboard_options(request):
     })
 
 
+
+def customer_order_payload(user_id, requested_order_id=None):
+    """Return one order only when it belongs to the authenticated Telegram customer."""
+    with db_connect() as conn:
+        if requested_order_id:
+            row = conn.execute("""
+                SELECT * FROM orders
+                WHERE order_id=? AND telegram_user_id=?
+                LIMIT 1
+            """, (requested_order_id, user_id)).fetchone()
+        else:
+            row = conn.execute("""
+                SELECT * FROM orders
+                WHERE telegram_user_id=?
+                ORDER BY placed_at DESC
+                LIMIT 1
+            """, (user_id,)).fetchone()
+
+        if not row:
+            return None
+
+        item_rows = conn.execute("""
+            SELECT item_name, category, quantity, unit_price_usd,
+                   unit_price_khr, options_json
+            FROM order_items
+            WHERE order_id=?
+            ORDER BY id
+        """, (row["order_id"],)).fetchall()
+
+    items = []
+    for item in item_rows:
+        try:
+            options = json.loads(item["options_json"] or "{}")
+        except Exception:
+            options = {}
+        items.append({
+            "name": item["item_name"],
+            "category": item["category"],
+            "qty": int(item["quantity"]),
+            "unitPriceUSD": float(item["unit_price_usd"]),
+            "unitPriceKHR": int(item["unit_price_khr"]),
+            "options": options,
+        })
+
+    return {
+        "orderId": row["order_id"],
+        "status": row["status"],
+        "placedAt": row["placed_at"],
+        "acceptedAt": row["accepted_at"],
+        "inProgressAt": row["in_progress_at"],
+        "readyAt": row["ready_at"],
+        "notAcceptedAt": row["not_accepted_at"],
+        "totalUSD": float(row["total_usd"]),
+        "totalKHR": int(row["total_khr"]),
+        "items": items,
+    }
+
+
+async def api_my_order(request):
+    """Authenticated customer tracking endpoint."""
+    try:
+        init_fields = validate_telegram_init_data(request.query.get("initData", ""))
+        user_data = json.loads(init_fields.get("user", "{}"))
+        user_id = int(user_data["id"])
+        requested_order_id = request.query.get("orderId") or None
+        order = customer_order_payload(user_id, requested_order_id)
+        return web.json_response(
+            {"ok": True, "order": order},
+            headers={
+                "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
+                "Cache-Control": "no-store",
+            },
+        )
+    except Exception as exc:
+        logger.exception("Customer tracking API failed")
+        return web.json_response(
+            {"ok": False, "error": str(exc)},
+            status=400,
+            headers={"Access-Control-Allow-Origin": ALLOWED_ORIGIN},
+        )
+
+
+async def api_my_order_options(request):
+    return web.Response(status=204, headers={
+        "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+    })
+
+
+
 async def api_order(request):
     """Receive orders when the Mini App was opened from Telegram's persistent menu button."""
     try:
@@ -988,6 +1079,8 @@ async def start_api(application):
     api["telegram_bot"] = application.bot
     api.router.add_post("/api/order", api_order)
     api.router.add_options("/api/order", api_options)
+    api.router.add_get("/api/my-order", api_my_order)
+    api.router.add_options("/api/my-order", api_my_order_options)
     api.router.add_get("/api/dashboard", api_dashboard)
     api.router.add_options("/api/dashboard", api_dashboard_options)
     runner = web.AppRunner(api)
