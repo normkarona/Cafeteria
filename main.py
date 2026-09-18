@@ -955,33 +955,14 @@ async def api_dashboard_options(request):
 
 
 
-def customer_order_payload(user_id, requested_order_id=None):
-    """Return one order only when it belongs to the authenticated Telegram customer."""
-    with db_connect() as conn:
-        if requested_order_id:
-            row = conn.execute("""
-                SELECT * FROM orders
-                WHERE order_id=? AND telegram_user_id=?
-                LIMIT 1
-            """, (requested_order_id, user_id)).fetchone()
-        else:
-            row = conn.execute("""
-                SELECT * FROM orders
-                WHERE telegram_user_id=?
-                ORDER BY placed_at DESC
-                LIMIT 1
-            """, (user_id,)).fetchone()
-
-        if not row:
-            return None
-
-        item_rows = conn.execute("""
-            SELECT item_name, category, quantity, unit_price_usd,
-                   unit_price_khr, options_json
-            FROM order_items
-            WHERE order_id=?
-            ORDER BY id
-        """, (row["order_id"],)).fetchall()
+def _customer_order_dict(conn, row):
+    item_rows = conn.execute("""
+        SELECT item_name, category, quantity, unit_price_usd,
+               unit_price_khr, options_json
+        FROM order_items
+        WHERE order_id=?
+        ORDER BY id
+    """, (row["order_id"],)).fetchall()
 
     items = []
     for item in item_rows:
@@ -1012,16 +993,59 @@ def customer_order_payload(user_id, requested_order_id=None):
     }
 
 
+def customer_orders_payload(user_id, requested_order_id=None):
+    """
+    Return all active orders for this Telegram customer.
+    Also keep recently completed/rejected orders visible for 60 minutes.
+    Multiple simultaneous pending/accepted/in-progress orders are supported.
+    """
+    with db_connect() as conn:
+        if requested_order_id:
+            rows = conn.execute("""
+                SELECT * FROM orders
+                WHERE order_id=? AND telegram_user_id=?
+                LIMIT 1
+            """, (requested_order_id, user_id)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT * FROM orders
+                WHERE telegram_user_id=?
+                  AND (
+                    status IN ('pending', 'accepted', 'in_progress')
+                    OR (
+                      status='ready'
+                      AND ready_at IS NOT NULL
+                      AND datetime(ready_at) >= datetime('now', '-60 minutes')
+                    )
+                    OR (
+                      status='not_accepted'
+                      AND not_accepted_at IS NOT NULL
+                      AND datetime(not_accepted_at) >= datetime('now', '-60 minutes')
+                    )
+                  )
+                ORDER BY placed_at DESC
+                LIMIT 10
+            """, (user_id,)).fetchall()
+
+        return [_customer_order_dict(conn, row) for row in rows]
+
+
 async def api_my_order(request):
-    """Authenticated customer tracking endpoint."""
+    """Authenticated customer tracking endpoint supporting multiple concurrent orders."""
     try:
         init_fields = validate_telegram_init_data(request.query.get("initData", ""))
         user_data = json.loads(init_fields.get("user", "{}"))
         user_id = int(user_data["id"])
         requested_order_id = request.query.get("orderId") or None
-        order = customer_order_payload(user_id, requested_order_id)
+        orders = customer_orders_payload(user_id, requested_order_id)
+
+        # Keep "order" for compatibility while adding the multi-order "orders" array.
         return web.json_response(
-            {"ok": True, "order": order},
+            {
+                "ok": True,
+                "order": orders[0] if orders else None,
+                "orders": orders,
+            },
             headers={
                 "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
                 "Cache-Control": "no-store",
